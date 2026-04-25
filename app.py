@@ -354,7 +354,7 @@ def call_gemini(prompt, model):
     except ImportError:
         return llm_error("gemini", model, "google-genai is not installed. Run: pip install google-genai")
 
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
     if not api_key:
         return llm_error("gemini", model, "GEMINI_API_KEY is missing.")
 
@@ -381,7 +381,7 @@ def call_openai(prompt, model):
     except ImportError:
         return llm_error("openai", model, "openai is not installed. Run: pip install openai")
 
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
     if not api_key:
         return llm_error("openai", model, "OPENAI_API_KEY is missing.")
 
