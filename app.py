@@ -576,6 +576,37 @@ def extract_metric_series(company_facts, concept_candidates):
     return []
 
 
+def tradingview_period_to_frame(period_text):
+    match = re.fullmatch(r"(\d{4})-Q([1-4])", period_text or "")
+    if not match:
+        return None
+    return f"CY{match.group(1)}Q{match.group(2)}"
+
+
+def fetch_tradingview_latest_earnings(symbol: str, exchange: str = ""):
+    exchange_code = (exchange or "NYSE").split()[0].upper()
+    url = f"https://www.tradingview.com/symbols/{exchange_code}-{quote_plus(symbol.upper())}/"
+    try:
+        raw = fetch_text(url)
+    except Exception:
+        return {}
+
+    def extract_number(field_name):
+        match = re.search(rf'"{re.escape(field_name)}":\s*([0-9.]+)', raw)
+        return float(match.group(1)) if match else None
+
+    fiscal_period_match = re.search(r'"earnings_fiscal_period_fq":"([^"]+)"', raw)
+    release_ts = extract_number("earnings_release_date")
+    if not release_ts or not fiscal_period_match:
+        return {}
+
+    release_date = datetime.utcfromtimestamp(release_ts).date().isoformat()
+    return {
+        "frame": tradingview_period_to_frame(fiscal_period_match.group(1)),
+        "releaseDate": release_date,
+    }
+
+
 def fetch_price_series(symbol: str):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote_plus(symbol)}?range=3y&interval=1d&includeAdjustedClose=true"
     payload = fetch_json(url)
@@ -648,6 +679,12 @@ def trading_day_on_or_after(prices, event_date):
     return valid[0] if valid else None
 
 
+def next_trading_day(prices, event_date):
+    target = datetime.strptime(event_date, "%Y-%m-%d").date()
+    valid = [item for item in prices if item["date"] > target]
+    return valid[0] if valid else None
+
+
 def format_billions(raw_value):
     if raw_value is None:
         return "N/A"
@@ -713,7 +750,7 @@ def build_trend_note(rows, index):
     return "; ".join(notes[:3]) or "Baseline quarter in view"
 
 
-def build_financial_rows(symbol: str):
+def build_financial_rows(symbol: str, exchange: str = ""):
     company_facts, sec_info = get_company_facts(symbol)
     if not company_facts:
         return None, sec_info
@@ -741,15 +778,19 @@ def build_financial_rows(symbol: str):
     common_frames = common_frames[-MAX_DEEP_DIVE_ROWS:]
 
     prices = fetch_price_series(symbol)
+    tradingview_event = fetch_tradingview_latest_earnings(symbol, exchange)
     rows = []
     for frame in common_frames:
         revenue_item = revenue_by_frame[frame]
         eps_item = eps_by_frame[frame]
         end_date = eps_item["periodEnd"]
         filed_date = max(revenue_item.get("filed") or "", eps_item.get("filed") or "")
+        if tradingview_event.get("frame") == frame and tradingview_event.get("releaseDate"):
+            filed_date = tradingview_event["releaseDate"]
         close_price = closing_price_on_or_before(prices, end_date)
         pre_report_day = trading_day_before(prices, filed_date) if filed_date else None
         report_day = trading_day_on_or_after(prices, filed_date) if filed_date else None
+        next_report_day = next_trading_day(prices, report_day["date"].isoformat()) if report_day else None
         rows.append(
             {
                 "frame": frame,
@@ -760,8 +801,13 @@ def build_financial_rows(symbol: str):
                 "eps": float(eps_item["value"]) if eps_item["value"] is not None else None,
                 "closePrice": close_price,
                 "preReportPrice": pre_report_day["close"] if pre_report_day else None,
+                "preReportDate": pre_report_day["date"].isoformat() if pre_report_day else None,
                 "reportOpenPrice": report_day.get("open") if report_day else None,
                 "reportClosePrice": report_day.get("close") if report_day else None,
+                "reportDate": report_day["date"].isoformat() if report_day else None,
+                "nextReportOpenPrice": next_report_day.get("open") if next_report_day else None,
+                "nextReportClosePrice": next_report_day.get("close") if next_report_day else None,
+                "nextReportDate": next_report_day["date"].isoformat() if next_report_day else None,
             }
         )
 
@@ -772,11 +818,13 @@ def build_financial_rows(symbol: str):
             row["pe"] = (row["closePrice"] / trailing_eps) if row.get("closePrice") and trailing_eps else None
             row["preReportPe"] = (row["preReportPrice"] / trailing_eps) if row.get("preReportPrice") and trailing_eps else None
             row["reportClosePe"] = (row["reportClosePrice"] / trailing_eps) if row.get("reportClosePrice") and trailing_eps else None
+            row["nextReportClosePe"] = (row["nextReportClosePrice"] / trailing_eps) if row.get("nextReportClosePrice") and trailing_eps else None
         else:
             row["ttmEps"] = None
             row["pe"] = None
             row["preReportPe"] = None
             row["reportClosePe"] = None
+            row["nextReportClosePe"] = None
 
         prev_year_idx = idx - 4
         if prev_year_idx >= 0:
@@ -904,9 +952,29 @@ def build_earnings_analysis(rows, metrics):
         before_report = row.get("preReportPrice")
         report_open = row.get("reportOpenPrice")
         report_close = row.get("reportClosePrice")
-        gap_pct = pct_change(report_open, before_report) if report_open is not None and before_report is not None else None
-        close_reaction = pct_change(report_close, before_report) if report_close is not None and before_report is not None else None
-        pe_reaction = pct_change(row.get("reportClosePe"), row.get("preReportPe")) if row.get("reportClosePe") is not None and row.get("preReportPe") is not None else None
+        next_open = row.get("nextReportOpenPrice")
+        next_close = row.get("nextReportClosePrice")
+
+        same_day_gap = pct_change(report_open, before_report) if report_open is not None and before_report is not None else None
+        same_day_close = pct_change(report_close, before_report) if report_close is not None and before_report is not None else None
+        next_day_gap = pct_change(next_open, report_close) if next_open is not None and report_close is not None else None
+        next_day_close = pct_change(next_close, report_close) if next_close is not None and report_close is not None else None
+
+        use_next_day = (
+            next_day_gap is not None
+            and (
+                same_day_gap is None
+                or abs(next_day_gap) > abs(same_day_gap) + 1.0
+            )
+        )
+
+        reaction_date = row.get("nextReportDate") if use_next_day else row.get("reportDate")
+        reaction_basis = "next session" if use_next_day else "same day"
+        gap_pct = next_day_gap if use_next_day else same_day_gap
+        close_reaction = next_day_close if use_next_day else same_day_close
+        pre_reaction_pe = row.get("reportClosePe") if use_next_day else row.get("preReportPe")
+        post_reaction_pe = row.get("nextReportClosePe") if use_next_day else row.get("reportClosePe")
+        pe_reaction = pct_change(post_reaction_pe, pre_reaction_pe) if post_reaction_pe is not None and pre_reaction_pe is not None else None
 
         if gap_pct is None:
             price_label = "No earnings-day reaction history"
@@ -944,6 +1012,8 @@ def build_earnings_analysis(rows, metrics):
             {
                 "quarter": row.get("label"),
                 "reportRead": classify_earnings_reaction(row),
+                "reactionDate": reaction_date,
+                "reactionBasis": reaction_basis,
                 "priceReactionPct": gap_pct,
                 "closeReactionPct": close_reaction,
                 "priceReactionLabel": price_label,
@@ -1221,7 +1291,7 @@ def build_deep_dive_base(query):
         }
 
     with ThreadPoolExecutor(max_workers=3) as executor:
-        rows_future = executor.submit(build_financial_rows, company["symbol"])
+        rows_future = executor.submit(build_financial_rows, company["symbol"], company.get("exchange") or "")
         quote_future = executor.submit(fetch_current_quote, company["symbol"])
         headlines_future = executor.submit(scan_news, company["symbol"], True, False)
         rows, sec_info = rows_future.result()
@@ -1455,7 +1525,7 @@ def build_narrative_shift_base(query):
         }
 
     with ThreadPoolExecutor(max_workers=3) as executor:
-        rows_future = executor.submit(build_financial_rows, company["symbol"])
+        rows_future = executor.submit(build_financial_rows, company["symbol"], company.get("exchange") or "")
         quote_future = executor.submit(fetch_current_quote, company["symbol"])
         headlines_future = executor.submit(scan_news, company["symbol"], True, False)
         rows, sec_info = rows_future.result()
