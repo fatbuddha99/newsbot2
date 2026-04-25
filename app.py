@@ -111,9 +111,22 @@ warnings.filterwarnings("ignore", message=r".*utcnow\(\) is deprecated.*", categ
 warnings.filterwarnings("ignore", message=r".*utcfromtimestamp\(\) is deprecated.*", category=DeprecationWarning)
 
 
+def redact_sensitive_text(text: str) -> str:
+    if not text:
+        return text
+    redacted = text
+    for env_key in ("OPENAI_API_KEY", "GEMINI_API_KEY"):
+        secret = os.getenv(env_key)
+        if secret:
+            redacted = redacted.replace(secret, f"{env_key[:6]}***REDACTED***")
+    redacted = re.sub(r"Bearer\s+[A-Za-z0-9_\-]+", "Bearer ***REDACTED***", redacted)
+    redacted = re.sub(r"sk-[A-Za-z0-9_\-]+", "sk-***REDACTED***", redacted)
+    return redacted
+
+
 def log_runtime_error(scope: str, exc: Exception):
-    print(f"[{scope}] {type(exc).__name__}: {exc}", flush=True)
-    trace = traceback.format_exc()
+    print(redact_sensitive_text(f"[{scope}] {type(exc).__name__}: {exc}"), flush=True)
+    trace = redact_sensitive_text(traceback.format_exc())
     if trace and trace.strip() != "NoneType: None":
         print(trace, flush=True)
 
@@ -364,6 +377,7 @@ def call_gemini(prompt, model):
 def call_openai(prompt, model):
     try:
         from openai import OpenAI
+        import httpx
     except ImportError:
         return llm_error("openai", model, "openai is not installed. Run: pip install openai")
 
@@ -371,8 +385,10 @@ def call_openai(prompt, model):
     if not api_key:
         return llm_error("openai", model, "OPENAI_API_KEY is missing.")
 
+    http_client = None
     try:
-        client = OpenAI(api_key=api_key)
+        http_client = httpx.Client(http2=False, timeout=httpx.Timeout(30.0, connect=10.0))
+        client = OpenAI(api_key=api_key, timeout=30.0, max_retries=1, http_client=http_client)
         response = client.responses.create(model=model, input=prompt)
         text = extract_openai_text(response)
         return {
@@ -385,6 +401,9 @@ def call_openai(prompt, model):
     except Exception as exc:
         log_runtime_error(f"llm:openai:{model}", exc)
         return llm_error("openai", model, f"LLM ERROR: {exc}")
+    finally:
+        if http_client is not None:
+            http_client.close()
 
 
 def normalize_llm_mode(mode):
