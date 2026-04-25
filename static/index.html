@@ -22,7 +22,7 @@
           </div>
           <div class="status-card">
             <span class="status-label">Engine</span>
-            <strong>Python RSS + Gemini</strong>
+            <strong id="engineValue">Python RSS + Auto</strong>
           </div>
           <div class="status-card">
             <span class="status-label">Scan</span>
@@ -41,6 +41,7 @@
             <label class="command-label" for="queryInput">query</label>
             <input id="queryInput" name="query" type="text" autocomplete="off" placeholder="GLOBAL or ticker / keyword">
             <button type="submit">Run Scan</button>
+            <button id="llmToggle" class="secondary" type="button">LLM: AUTO</button>
             <button id="focusToggle" class="secondary" type="button">Focus: ON</button>
             <button id="refreshButton" class="secondary" type="button">Refresh</button>
           </form>
@@ -60,10 +61,56 @@
 
         <article class="panel panel--analysis">
           <div class="panel__header">
-            <p class="eyebrow">AI Agent</p>
-            <h2>Strategic Insight</h2>
+            <div>
+              <p class="eyebrow">AI Agent</p>
+              <div class="analysis-title-row">
+                <h2 id="analysisTitle">Strategic Insight</h2>
+                <span id="analysisStatusBadge" class="analysis-status-badge analysis-status-badge--hidden">Loading analysis...</span>
+              </div>
+            </div>
+            <div class="analysis-switcher">
+              <button id="insightViewButton" class="secondary is-active" type="button">Insight</button>
+              <button id="deepDiveViewButton" class="secondary" type="button">Deep Dive</button>
+              <button id="narrativeShiftViewButton" class="secondary" type="button">Narrative Shift</button>
+            </div>
           </div>
-          <pre id="analysisOutput" class="analysis">Run a scan to generate an intelligence brief.</pre>
+          <div id="analysisView" class="analysis-view">
+            <pre id="analysisOutput" class="analysis">Run a scan to generate an intelligence brief.</pre>
+          </div>
+          <div id="deepDiveView" class="analysis-view analysis-view--hidden">
+            <div id="deepDiveEmpty" class="deep-dive-empty">Search a ticker or company, then open Deep Dive.</div>
+            <div id="deepDiveContent" class="deep-dive-content deep-dive-content--hidden">
+              <div id="deepDiveHeader" class="deep-dive-header"></div>
+              <div id="deepDiveMetrics" class="deep-dive-metrics"></div>
+              <div id="deepDiveGrowthSignal" class="deep-dive-growth-signal"></div>
+              <div class="deep-dive-table-wrap">
+                <table class="deep-dive-table">
+                  <thead>
+                    <tr>
+                      <th>Quarter End</th>
+                      <th>Revenue</th>
+                      <th>Diluted EPS</th>
+                      <th>TTM P/E</th>
+                      <th>Closing Price</th>
+                      <th>Trend Notes</th>
+                    </tr>
+                  </thead>
+                  <tbody id="deepDiveTableBody"></tbody>
+                </table>
+              </div>
+              <div id="deepDiveHeadlineContext" class="deep-dive-headline-context"></div>
+              <div id="deepDiveSections" class="deep-dive-sections"></div>
+            </div>
+          </div>
+          <div id="narrativeShiftView" class="analysis-view analysis-view--hidden">
+            <div id="narrativeShiftEmpty" class="deep-dive-empty">Search a ticker or company, then open Narrative Shift.</div>
+            <div id="narrativeShiftContent" class="deep-dive-content deep-dive-content--hidden">
+              <div id="narrativeShiftHeader" class="deep-dive-header"></div>
+              <div id="narrativeShiftMetrics" class="deep-dive-metrics"></div>
+              <div id="narrativeShiftHeadlines" class="deep-dive-headline-context"></div>
+              <div id="narrativeShiftSections" class="deep-dive-sections"></div>
+            </div>
+          </div>
         </article>
       </section>
     </main>

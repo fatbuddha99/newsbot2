@@ -10,3 +10,6 @@ env/
 
 .DS_Store
 Thumbs.db
+.signal_terminal_cache.json
+server.out
+server.err
