@@ -290,11 +290,31 @@ function renderDeepDive(data) {
     </section>
   `;
 
+  const earningsAnalysis = metrics.earningsAnalysis || {};
+  const earningsEvents = Array.isArray(earningsAnalysis.events) ? earningsAnalysis.events : [];
+  const earningsEventsHtml = earningsEvents.length
+    ? `
+      <ul class="deep-dive-headline-list">
+        ${earningsEvents
+          .map(
+            (event) => `
+              <li>
+                <strong>${event.quarter || "Quarter"}</strong>: ${event.reportRead || "Report read unavailable"}; ${event.priceReactionLabel || "Price response unavailable"}${event.priceReactionPct != null ? ` (${event.priceReactionPct.toFixed(1)}%)` : ""}; ${event.peReactionLabel || "P/E response unavailable"}${event.peReactionPct != null ? ` (${event.peReactionPct.toFixed(1)}%)` : ""}
+                ${event.closeReactionPct != null ? `; close reaction ${event.closeReactionPct.toFixed(1)}%` : ""}
+              </li>
+            `,
+          )
+          .join("")}
+      </ul>
+    `
+    : "";
+
   const orderedSections = [
     ["What is the company business", sections.business],
     ["How does it make money", sections.money],
     ["Moat vs competition", sections.moat],
     ["Financial performance", sections.financialPerformance],
+    ["Earnings analysis", `${sections.earningsAnalysis || earningsAnalysis.summary || "Earnings reaction analysis unavailable."}${earningsEventsHtml}`],
     ["PE compression frame", sections.valuationFrame || (metrics.peCompressionFrame && metrics.peCompressionFrame.summary)],
     ["Fair value and re-rating lens", sections.fairValue],
     ["Projection and risk", sections.projectionRisk],
@@ -304,7 +324,7 @@ function renderDeepDive(data) {
       ([title, body], index) => `
         <section class="deep-dive-section">
           <h4>${index + 1}. ${title}</h4>
-          <p>${body || "Analysis unavailable."}</p>
+          ${typeof body === "string" && body.includes("<ul") ? body.replace(/^([^<]+)/, "<p>$1</p>") : `<p>${body || "Analysis unavailable."}</p>`}
         </section>
       `,
     )

@@ -48,6 +48,7 @@ INSIGHT_TTL_SECONDS = 900
 GLOBAL_INSIGHT_TTL_SECONDS = 1800
 BASE_ANALYSIS_TTL_SECONDS = 6 * 60 * 60
 FULL_ANALYSIS_TTL_SECONDS = 24 * 60 * 60
+CACHE_VERSION = "2026-04-25-earnings-reaction-v2"
 
 NEWS_SOURCES = [
     {
@@ -158,7 +159,7 @@ def save_disk_cache():
 
 
 def cache_key_text(key):
-    return json.dumps(key, sort_keys=True)
+    return json.dumps({"v": CACHE_VERSION, "k": key}, sort_keys=True)
 
 
 def cache_get(key):
@@ -581,13 +582,20 @@ def fetch_price_series(symbol: str):
     result = payload.get("chart", {}).get("result", [{}])[0]
     timestamps = result.get("timestamp", [])
     quote = (result.get("indicators", {}).get("quote") or [{}])[0]
+    opens = quote.get("open") or []
     closes = quote.get("close") or []
 
     prices = []
-    for ts, close in zip(timestamps, closes):
+    for ts, open_price, close in zip(timestamps, opens, closes):
         if close is None:
             continue
-        prices.append({"date": datetime.utcfromtimestamp(ts).date(), "close": float(close)})
+        prices.append(
+            {
+                "date": datetime.utcfromtimestamp(ts).date(),
+                "open": float(open_price) if open_price is not None else None,
+                "close": float(close),
+            }
+        )
     return prices
 
 
@@ -626,6 +634,18 @@ def closing_price_on_or_before(prices, period_end):
     if not valid:
         return None
     return valid[-1]["close"]
+
+
+def trading_day_before(prices, event_date):
+    target = datetime.strptime(event_date, "%Y-%m-%d").date()
+    valid = [item for item in prices if item["date"] < target]
+    return valid[-1] if valid else None
+
+
+def trading_day_on_or_after(prices, event_date):
+    target = datetime.strptime(event_date, "%Y-%m-%d").date()
+    valid = [item for item in prices if item["date"] >= target]
+    return valid[0] if valid else None
 
 
 def format_billions(raw_value):
@@ -726,15 +746,22 @@ def build_financial_rows(symbol: str):
         revenue_item = revenue_by_frame[frame]
         eps_item = eps_by_frame[frame]
         end_date = eps_item["periodEnd"]
+        filed_date = max(revenue_item.get("filed") or "", eps_item.get("filed") or "")
         close_price = closing_price_on_or_before(prices, end_date)
+        pre_report_day = trading_day_before(prices, filed_date) if filed_date else None
+        report_day = trading_day_on_or_after(prices, filed_date) if filed_date else None
         rows.append(
             {
                 "frame": frame,
                 "label": quarter_label(eps_item["year"], eps_item["quarter"]),
                 "periodEnd": end_date,
+                "filedDate": filed_date,
                 "revenueRaw": revenue_item["value"],
                 "eps": float(eps_item["value"]) if eps_item["value"] is not None else None,
                 "closePrice": close_price,
+                "preReportPrice": pre_report_day["close"] if pre_report_day else None,
+                "reportOpenPrice": report_day.get("open") if report_day else None,
+                "reportClosePrice": report_day.get("close") if report_day else None,
             }
         )
 
@@ -743,9 +770,13 @@ def build_financial_rows(symbol: str):
             trailing_eps = sum(item["eps"] for item in rows[idx - 3 : idx + 1] if item["eps"] is not None)
             row["ttmEps"] = trailing_eps
             row["pe"] = (row["closePrice"] / trailing_eps) if row.get("closePrice") and trailing_eps else None
+            row["preReportPe"] = (row["preReportPrice"] / trailing_eps) if row.get("preReportPrice") and trailing_eps else None
+            row["reportClosePe"] = (row["reportClosePrice"] / trailing_eps) if row.get("reportClosePrice") and trailing_eps else None
         else:
             row["ttmEps"] = None
             row["pe"] = None
+            row["preReportPe"] = None
+            row["reportClosePe"] = None
 
         prev_year_idx = idx - 4
         if prev_year_idx >= 0:
@@ -843,6 +874,106 @@ def compute_growth_profile(rows):
     return score, label, summary
 
 
+def classify_earnings_reaction(row):
+    rev_yoy = row.get("revenueYoY")
+    eps_yoy = row.get("epsYoY")
+
+    if rev_yoy is not None and eps_yoy is not None:
+        if rev_yoy > 0 and eps_yoy > 0:
+            return "Double-positive quarter"
+        if rev_yoy > 0 and eps_yoy <= 0:
+            return "Beat top line / weak bottom line"
+        if rev_yoy <= 0 and eps_yoy > 0:
+            return "Miss top line / beat bottom line"
+        return "Missed top and bottom line"
+    if rev_yoy is not None:
+        return "Top-line positive" if rev_yoy > 0 else "Top-line soft"
+    if eps_yoy is not None:
+        return "Bottom-line positive" if eps_yoy > 0 else "Bottom-line soft"
+    return "Limited report history"
+
+
+def build_earnings_analysis(rows, metrics):
+    if not rows:
+        return {"summary": "No earnings reaction data available yet.", "events": []}
+
+    events = []
+    start_index = max(0, len(rows) - 3)
+    for idx in range(len(rows) - 1, start_index - 1, -1):
+        row = rows[idx]
+        before_report = row.get("preReportPrice")
+        report_open = row.get("reportOpenPrice")
+        report_close = row.get("reportClosePrice")
+        gap_pct = pct_change(report_open, before_report) if report_open is not None and before_report is not None else None
+        close_reaction = pct_change(report_close, before_report) if report_close is not None and before_report is not None else None
+        pe_reaction = pct_change(row.get("reportClosePe"), row.get("preReportPe")) if row.get("reportClosePe") is not None and row.get("preReportPe") is not None else None
+
+        if gap_pct is None:
+            price_label = "No earnings-day reaction history"
+        elif gap_pct >= 4:
+            price_label = "Gap up"
+        elif gap_pct >= 1:
+            price_label = "Opened up"
+        elif gap_pct <= -4:
+            price_label = "Gap down"
+        elif gap_pct <= -1:
+            price_label = "Opened down"
+        else:
+            price_label = "Flat open"
+
+        if gap_pct is not None and close_reaction is not None:
+            if gap_pct < 0 and close_reaction > 0:
+                price_label = "Gap down then reversed up"
+            elif gap_pct > 0 and close_reaction < 0:
+                price_label = "Gap up then faded"
+            elif gap_pct > 0 and close_reaction > gap_pct + 1.0:
+                price_label = "Gap up and held"
+            elif gap_pct < 0 and close_reaction < gap_pct - 1.0:
+                price_label = "Gap down and stayed weak"
+
+        if pe_reaction is None:
+            pe_label = "P/E unavailable"
+        elif pe_reaction >= 3:
+            pe_label = "P/E expanded"
+        elif pe_reaction <= -3:
+            pe_label = "P/E compressed"
+        else:
+            pe_label = "P/E stable"
+
+        events.append(
+            {
+                "quarter": row.get("label"),
+                "reportRead": classify_earnings_reaction(row),
+                "priceReactionPct": gap_pct,
+                "closeReactionPct": close_reaction,
+                "priceReactionLabel": price_label,
+                "peReactionPct": pe_reaction,
+                "peReactionLabel": pe_label,
+            }
+        )
+
+    latest_event = events[0] if events else None
+    since_last_er = metrics.get("moveVsLastQuarter")
+    since_last_er_text = f"{since_last_er:.1f}%" if since_last_er is not None else "N/A"
+    current_price = metrics.get("currentPrice", "N/A")
+    current_pe = metrics.get("currentPe", "N/A")
+
+    summary = []
+    if latest_event:
+        latest_line = f"The latest reported quarter ({latest_event['quarter']}) reads as {latest_event['reportRead'].lower()}."
+        if latest_event.get("priceReactionPct") is not None:
+            latest_line += f" The earnings-day reaction was {latest_event['priceReactionLabel'].lower()} ({latest_event['priceReactionPct']:.1f}% gap/open move"
+            if latest_event.get("closeReactionPct") is not None:
+                latest_line += f", {latest_event['closeReactionPct']:.1f}% by the close"
+            latest_line += ")."
+        if latest_event.get("peReactionLabel") and latest_event["peReactionLabel"] != "P/E unavailable":
+            latest_line += f" The multiple {latest_event['peReactionLabel'].lower()}."
+        summary.append(latest_line)
+    summary.append(f"Current price is {current_price}, which is {since_last_er_text} since the last reported quarter-end, with current TTM P/E at {current_pe}.")
+
+    return {"summary": " ".join(summary).strip(), "events": events}
+
+
 def enrich_live_metrics(metrics, rows, quote):
     if not rows:
         return metrics
@@ -896,6 +1027,7 @@ def build_fallback_sections(company, metrics):
         "money": f"It makes money by selling products and services within its core industry. The latest quarter in this view shows revenue of {latest_rev} and diluted EPS of {latest_eps}.",
         "moat": "The moat depends on brand, scale, switching costs, data, distribution, or regulated positioning. The financial view should be read alongside competitive pressure and customer concentration.",
         "financialPerformance": f"Over the displayed eight-quarter window, revenue growth is {revenue_growth:.1f}% and EPS growth is {eps_growth:.1f}%." if revenue_growth is not None and eps_growth is not None else "The table shows the company’s quarter-by-quarter revenue, EPS, quarter-end price, and trailing P/E trend.",
+        "earningsAnalysis": (metrics.get("earningsAnalysis") or {}).get("summary", "Earnings reaction analysis is unavailable."),
         "valuationFrame": "Use the P/E compression framework only when earnings are still growing while the valuation multiple has materially fallen. If fundamentals are weakening alongside the lower multiple, the setup may be a value trap rather than a healthy compression story.",
         "fairValue": "Fair value is not the same thing as the last traded price. If the market is changing the narrative around the company or the whole sector, perceived value can be re-rated higher or lower before the fundamentals fully catch up.",
         "projectionRisk": f"Quarter-end valuation was {metrics.get('latestPrice', 'N/A')} at {latest_pe}, while the live market is now around {metrics.get('currentPrice', 'N/A')} at {metrics.get('currentPe', 'N/A')}. " + (f"P/E moved {pe_change:.1f}% across the window, which can indicate multiple compression or expansion beyond earnings alone." if pe_change is not None else "Future upside depends on earnings durability, guidance, and market sentiment."),
@@ -994,9 +1126,10 @@ def analyze_deep_dive_with_gemini(company, rows, metrics, headlines_context="", 
     prompt = (
         "You are a disciplined equity research analyst.\n"
         "Use the company metadata and 8-quarter table below to produce a JSON object with exactly these keys:\n"
-        'business, money, moat, financialPerformance, valuationFrame, fairValue, projectionRisk, headlineContext.\n'
+        'business, money, moat, financialPerformance, earningsAnalysis, valuationFrame, fairValue, projectionRisk, headlineContext.\n'
         "Each value should be 2-4 concise sentences, investor-friendly, plain English, and grounded in the supplied data.\n"
         "Focus on business model clarity, how the company earns revenue, moat vs competition, interpretation of revenue/EPS/price/P-E trends, latest headline context, and balanced projection plus risk.\n"
+        "For earningsAnalysis, review the supplied earnings reaction summary for the past 3 reported quarters. Treat double-positive revenue/EPS growth as a heuristic analog to a double beat, top-line positive with weak EPS as beat top line / weak bottom line, and negative revenue/EPS trends as miss-like. Explain whether price moved up/down and whether P/E expanded or compressed.\n"
         "When the data shows earnings are still growing while P/E has fallen, explicitly use the PE compression framework:\n"
         "1) growth at all costs, 2) stretched expectations, 3) normalizing growth, 4) PE compression, 5) mature compounder, 6) re-rating/bounce-back.\n"
         "If the setup does not truly fit PE compression, say that clearly and do not force it.\n"
@@ -1112,6 +1245,7 @@ def build_deep_dive_base(query):
     metrics = build_deep_dive_metrics(rows)
     metrics["peCompressionFrame"] = build_pe_compression_frame(metrics)
     metrics = enrich_live_metrics(metrics, rows, quote)
+    metrics["earningsAnalysis"] = build_earnings_analysis(rows, metrics)
     payload = {
         "ok": True,
         "company": company_payload,
