@@ -2,6 +2,8 @@ import json
 import os
 import re
 import ssl
+import traceback
+import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from html import unescape
@@ -104,6 +106,16 @@ API_CACHE = {}
 CACHE_FILE = BASE_DIR / ".signal_terminal_cache.json"
 DISK_CACHE = {}
 DISK_CACHE_LOCK = Lock()
+
+warnings.filterwarnings("ignore", message=r".*utcnow\(\) is deprecated.*", category=DeprecationWarning)
+warnings.filterwarnings("ignore", message=r".*utcfromtimestamp\(\) is deprecated.*", category=DeprecationWarning)
+
+
+def log_runtime_error(scope: str, exc: Exception):
+    print(f"[{scope}] {type(exc).__name__}: {exc}", flush=True)
+    trace = traceback.format_exc()
+    if trace and trace.strip() != "NoneType: None":
+        print(trace, flush=True)
 
 
 def fetch_text(url: str, headers=None) -> str:
@@ -345,6 +357,7 @@ def call_gemini(prompt, model):
             "error": "",
         }
     except Exception as exc:
+        log_runtime_error(f"llm:gemini:{model}", exc)
         return llm_error("gemini", model, f"LLM ERROR: {exc}")
 
 
@@ -370,6 +383,7 @@ def call_openai(prompt, model):
             "error": "",
         }
     except Exception as exc:
+        log_runtime_error(f"llm:openai:{model}", exc)
         return llm_error("openai", model, f"LLM ERROR: {exc}")
 
 
