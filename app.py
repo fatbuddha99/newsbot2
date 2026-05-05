@@ -48,7 +48,7 @@ INSIGHT_TTL_SECONDS = 900
 GLOBAL_INSIGHT_TTL_SECONDS = 1800
 BASE_ANALYSIS_TTL_SECONDS = 6 * 60 * 60
 FULL_ANALYSIS_TTL_SECONDS = 24 * 60 * 60
-CACHE_VERSION = "2026-04-25-earnings-reaction-v2"
+CACHE_VERSION = "2026-05-05-q4-backfill-v4"
 
 NEWS_SOURCES = [
     {
@@ -539,16 +539,43 @@ def get_company_facts(symbol: str):
 
 def pick_quarter_series(units):
     quarter_values = {}
+    annual_values = {}
     for entries in units.values():
         for entry in entries:
             frame = entry.get("frame") or ""
             match = FRAME_QUARTER_RE.fullmatch(frame)
             if not match:
+                annual_frame_match = re.fullmatch(r"CY(\d{4})", frame)
+                if entry.get("fp") == "FY" or annual_frame_match:
+                    year = int(annual_frame_match.group(1)) if annual_frame_match else int((entry.get("end") or "0000")[:4])
+                    existing_annual = annual_values.get(year)
+                    if existing_annual is None or entry.get("filed", "") > existing_annual.get("filed", ""):
+                        annual_values[year] = entry
                 continue
             frame_key = f"CY{match.group(1)}Q{match.group(2)}"
             existing = quarter_values.get(frame_key)
             if existing is None or entry.get("filed", "") > existing.get("filed", ""):
                 quarter_values[frame_key] = entry
+
+    for year, annual_entry in annual_values.items():
+        q4_frame = f"CY{year}Q4"
+        if q4_frame in quarter_values:
+            continue
+        q1 = quarter_values.get(f"CY{year}Q1")
+        q2 = quarter_values.get(f"CY{year}Q2")
+        q3 = quarter_values.get(f"CY{year}Q3")
+        if not (q1 and q2 and q3):
+            continue
+        if any(item.get("val") is None for item in (q1, q2, q3)):
+            continue
+
+        derived_q4_value = annual_entry.get("val") - q1["val"] - q2["val"] - q3["val"]
+        quarter_values[q4_frame] = {
+            "end": annual_entry.get("end"),
+            "filed": annual_entry.get("filed"),
+            "val": derived_q4_value,
+            "derived": True,
+        }
 
     items = []
     for frame_key, entry in quarter_values.items():
@@ -561,6 +588,7 @@ def pick_quarter_series(units):
                 "periodEnd": entry.get("end"),
                 "filed": entry.get("filed"),
                 "value": entry.get("val"),
+                "derived": bool(entry.get("derived")),
             }
         )
 
@@ -814,15 +842,24 @@ def build_financial_rows(symbol: str, exchange: str = ""):
     for idx, row in enumerate(rows):
         if idx >= 3:
             trailing_eps = sum(item["eps"] for item in rows[idx - 3 : idx + 1] if item["eps"] is not None)
+            prior_trailing_eps = None
+            if idx >= 4:
+                prior_window = rows[idx - 4 : idx]
+                if len(prior_window) == 4 and all(item.get("eps") is not None for item in prior_window):
+                    prior_trailing_eps = sum(item["eps"] for item in prior_window)
             row["ttmEps"] = trailing_eps
+            row["priorTtmEps"] = prior_trailing_eps
             row["pe"] = (row["closePrice"] / trailing_eps) if row.get("closePrice") and trailing_eps else None
-            row["preReportPe"] = (row["preReportPrice"] / trailing_eps) if row.get("preReportPrice") and trailing_eps else None
+            row["preReportPe"] = (row["preReportPrice"] / prior_trailing_eps) if row.get("preReportPrice") and prior_trailing_eps else None
+            row["reportPreReleasePe"] = (row["reportClosePrice"] / prior_trailing_eps) if row.get("reportClosePrice") and prior_trailing_eps else None
             row["reportClosePe"] = (row["reportClosePrice"] / trailing_eps) if row.get("reportClosePrice") and trailing_eps else None
             row["nextReportClosePe"] = (row["nextReportClosePrice"] / trailing_eps) if row.get("nextReportClosePrice") and trailing_eps else None
         else:
             row["ttmEps"] = None
+            row["priorTtmEps"] = None
             row["pe"] = None
             row["preReportPe"] = None
+            row["reportPreReleasePe"] = None
             row["reportClosePe"] = None
             row["nextReportClosePe"] = None
 
@@ -972,7 +1009,7 @@ def build_earnings_analysis(rows, metrics):
         reaction_basis = "next session" if use_next_day else "same day"
         gap_pct = next_day_gap if use_next_day else same_day_gap
         close_reaction = next_day_close if use_next_day else same_day_close
-        pre_reaction_pe = row.get("reportClosePe") if use_next_day else row.get("preReportPe")
+        pre_reaction_pe = row.get("reportPreReleasePe") if use_next_day else row.get("preReportPe")
         post_reaction_pe = row.get("nextReportClosePe") if use_next_day else row.get("reportClosePe")
         pe_reaction = pct_change(post_reaction_pe, pre_reaction_pe) if post_reaction_pe is not None and pre_reaction_pe is not None else None
 
